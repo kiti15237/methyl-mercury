@@ -1,0 +1,565 @@
+---
+title: "presentation"
+output: html_document
+---
+
+```{r}
+knitr::opts_chunk$set(fig.width=15, fig.height = 12) 
+```
+
+#Load data
+```{r, echo=F, warning=F, message=F}
+options(width = 100)
+source("helper_functions.R")
+tmp <- loadPhyloseq(dir = "C:/Users/ctata/Documents/Lab/methyl-mercury")
+ps <- tmp[[1]]
+ps_dds <- tmp[[2]]
+```
+
+#Prune OTUs and clean sample data
+```{r}
+ps_dds_common <- getCommonOtus(ps_dds, numSamples = 12)
+ps_common <- getCommonOtus(ps_dds, numSamples = 12)
+
+ps_dds_common <- cleanSampleData(ps_dds_common)
+ps_common <- cleanSampleData(ps_common)
+
+otu_table(ps_common) <- asinh(otu_table(ps_common))
+#otu_table(ps) <- asinh(otu_table(ps))
+#ps_10 <- getCommonOtus(ps, numSamples = 10)
+#ps_5 <- getCommonOtus(ps, numSamples = 5)
+#ps_1 <- getCommonOtus(ps, numSamples = 1)
+#ps <- prune_samples(colSums(otu_table(ps_dds_common)) > 0, ps_dds_common)
+
+#Try normalizing with asinh
+```
+
+
+#Linear Regression
+```{r}
+models_pdi <- runLinearRegression(y = "bayley36_pdi_adj", ps = ps_common, 
+                    method = "basic", permutations = 10, title = "PDI R^2")
+models_mdi <- runLinearRegression(y = "bayley36_mdi_adj", ps = ps_common,
+                    method = "basic", permutations = 10, title = "MDI R^2")
+```
+
+#Cross-validated linear regression with regularization
+```{r}
+runLinearRegression(y = "bayley36_pdi_adj", ps = ps_common, 
+                    method = "cvglmnet", permutations = 10, title = "PDI R^2")
+runLinearRegression(y = "bayley36_mdi_adj", ps = ps_common,
+                    method = "cvglmnet", permutations = 10, title = "MDI R^2")
+
+```
+
+
+#PDI linear regression
+#####How much of PDI score variance can be explained by 1. just metadata 2. metadata and mercury information 3. metadata and microbiome 4. metadata and microbiome and mercury and 5. metadata and random noise variables that match the range of the microbiome and mercury data (equivalent to a null control). And what variables are most valuable in each model?
+```{r, echo=F, warning=F, message=F, fig.width = 15}
+
+df <- getDFMeta()
+runLinearTestBasic(y = "bayley36_pdi_adj", df= df, otu_mat = otu_keep, title =  "PDI variance explained using linear models")
+
+```
+
+#MDI linear regression
+#####How much of PDI score variance can be explained by the same models as above? And which variables are most vaulable in each model?
+```{r, echo=F, warning=F, message=F, fig.width = 15}
+runLinearTestBasic(y = "bayley36_mdi_adj",df = df,  otu_mat = otu_keep, title =  "PDI variance explained using linear models")
+```
+
+
+#Interaction terms: PDI 
+#####We'd like to know if there are interactions between the microbes we identified and the metadata characteristics. For instance, is the influence of sequence 64 more profound if the sample also has high maternal hair mercury concentration? In this model, we don't see any significant interactions
+```{r, echo=F, warning=F, message=F}
+#Are there interactions between the significant taxa and any of the significant metadata
+
+y = "bayley36_pdi_adj"
+df_stand <- getFullDF(y)
+vars <- c("male_1", "zhuang_1", "breastfeeding_median", "maternal_hair_thg_median", "child_fishshrimp_24hr_1", "hospital_1", "upperresp_1")
+seqvars <- c("seq7", "seq9", "seq16", "seq64")
+
+interactions <- c()
+for(seq in seqvars){
+  interactions <- c(interactions, paste(seq, ":", vars, sep = ""))
+}
+
+allvars <- c(vars, seqvars, interactions)
+form <- getFormula(allvars, y)
+fit <- lm(form, df_stand)
+
+print(summary(fit)$coefficients)
+
+```
+
+#Interaction terms: MDI
+##### We don't see significant interactions between the sequences associated with MDI scores and fish consumption, which is the only significant metadata variable. We do see a disappearance of significance of fish consumption when we include microbiome data, which makes us think that maybe there is information in the microbiome that accounts for the information originall provided by fish consumption. We look for correlation and find that seq1 is pretty significantly correlated with fish consumption, as expected
+```{r, echo=F, warning=F, message=F}
+#Are there interactions between the significant taxa and any of the significant metadata
+
+
+y = "bayley36_mdi_adj"
+other <- getOther(y)
+vars <- c("child_fishshrimp_24hr_1")
+seqvars <- c("seq1", "seq21")
+df_stand <- getFullDF(y)
+df_meta <- getDFMeta()
+
+interactions <- c()
+for(seq in seqvars){
+  interactions <- c(interactions, paste(seq, ":", vars, sep = ""))
+}
+vars <- colnames(df)[!(colnames(df) %in% c( other))]
+
+allvars <- c(vars, seqvars, interactions)
+form <- getFormula(allvars, y)
+fit <- lm(form, df_stand)
+
+print(summary(fit)$coefficients)
+
+print(cor.test(as.numeric(otu_keep[ , 'seq1']), df$child_fishshrimp_24hr_1))
+print(cor.test(as.numeric(otu_keep[ , 'seq21']), df$child_fishshrimp_24hr_1))
+print(paste("seq1: ", dict_esv_seq$taxa[dict_esv_seq$seq == 'seq1']))
+```
+
+
+
+#PERMANOVA
+#####Asking the reverse question - how much of the microbiomes structure differences can be explained by each lifestyle characteristic. Note we're using just the top 14 most abundant otus (present in > 25% of samples). Having a farmer mother can explain 6% of the variance and being a male can explain 4.5%. 
+```{r, echo=F, warning=F, message=F}
+library(vegan)
+dist_bray <- vegdist(otu_keep[rownames(df), ], method = "bray")
+vars <- paste(colnames(df), collapse = "+")
+form <-  formula(paste("dist_bray ~", vars))
+perm = adonis2(form, data = as.data.frame(df), method = "bray", perm = 9999)
+perm
+#Having a farmer mother can explain .06 percent of the variance in the microbiome. Being a male can explain .045% of it. 
+```
+
+
+#####Now the same test but using all otus instead of the top 14
+```{r}
+dist_bray <- vegdist(otu[rownames(df), ], method = "bray")
+vars <- paste(colnames(df), collapse = "+")
+form <-  formula(paste("dist_bray ~", vars))
+perm = adonis2(form, data = as.data.frame(df), method = "bray", perm = 9999)
+perm
+```
+
+
+#Phylogenetic tree
+##### Of the taxa that were labeled as "valuable" in the above models (seq7, seq9, seq16, seq64), the first three were associated with lower pdi and the last was associated with higher. We'd like to see where they fall on the phylogenetic tree. Red means negatively associated with pdi, and green means positively associated
+```{r, echo=F, warning=F, message=F, out.height = 20, fig.height = 30, fig.width = 40}
+#got tree from clustalWal online
+tree <- ape::read.tree("data/tree/phylotree.txt")
+seqvars_pdi_neg <- c("seq7 ", "seq9 ", "seq16 ")
+seqvars_pdi_pos <- c("seq64 ")
+seqvars_mdi_neg <- c("seq1 ")
+seqvars_mdi_pos <- c("seq21 ")
+```
+
+```{r}
+ps <- readRDS("data/ps.RDS")
+taxa_names(ps) <- dict_esv_seq$seq
+phy_tree(ps) <- tree
+
+ps_filt <- filter_taxa(ps, function(abund) return(sum(abund > 0) > 8), prune = T)
+seqs <- taxa_names(ps_filt)
+
+rownames(dict_esv_seq) <- dict_esv_seq$seq
+taxa <- dict_esv_seq[seqs, ]$taxa
+taxa <- paste(taxa, "(", seqs, ")")
+
+#Plot automatic colors
+cols = rep("black", length(taxa))
+
+for (seq in seqvars_pdi_neg){
+  cols[grepl(seq, taxa)] <- "red"
+}
+for(seq in seqvars_pdi_pos){
+  cols[grepl(seq, taxa)] <- "green"
+}
+for(seq in seqvars_mdi_neg){
+  cols[grepl(seq, taxa)] <- "purple"
+}
+for(seq in seqvars_mdi_pos){
+  cols[grepl(seq, taxa)] <- "blue"
+}
+
+tree <- phy_tree(ps_filt)
+tree$tip.label <- taxa
+plot(tree, tip.color = cols, cex = 1)
+legend("right", legend = c("PDI Neg", "PDI Pos", "MDI Neg", "MDI Pos"), col = c("red", "green", "purple", "blue"), pch = 12, cex= 2 )
+#plot_tree(ps_filt, label.tips = "taxa_names", tip.colors = 'red')
+
+```
+
+
+#Boxplots
+##### lastly, we'd like to directly see how the abunance of the microbial taxa relates to the pdi. 
+```{r, echo=F, warning=F, message=F}
+
+ps <- readRDS("data/ps.RDS")
+otu_raw <- data.frame(otu_table(ps))
+ps_dds <- readRDS("data/ps_dds.RDS")
+otu_dds <- data.frame(t(otu_table(ps_dds)))
+colnames(otu_dds) <- paste('seq', seq(1, ncol(otu_dds)), sep ="")
+otu_dds <- otu_dds[rownames(df),]
+otu_raw <- otu_raw[rownames(df), ]
+```
+
+
+```{r, echo=F, warning=F, message=F}
+knitr::opts_chunk$set(fig.width=13, fig.height = 9) 
+
+library(reshape2)
+library(ggplot2)
+df_use <- cbind(df, otu_dds)
+df_use$sampleid <- paste("Sample", seq(1, nrow(df_use)), sep = "")
+df_use$pdi_binned <- cut(df_use$bayley36_pdi_adj, breaks = 10)
+df_use$pdi_binned <- factor(df_use$pdi_binned, labels = seq(1, 9))
+df_use$diversity <- vegan::diversity(otu_raw, index = "shannon")
+df_use$seqDepth <- rowSums(otu_raw)
+df_melt <- melt(df_use, "sampleid")
+
+
+otus <- c("seq7", "seq9", "seq16", "seq64")
+for(otu in otus){
+  print(otu)
+  p <- ggplot(df_use, aes_string("bayley36_pdi_adj", y = otu))
+  p <- p + geom_point(aes(color = diversity, size = seqDepth))
+  print(p)
+}
+
+otus <- c("seq1", "seq21")
+for(otu in otus){
+  print(otu)
+  p <- ggplot(df_use, aes_string("bayley36_mdi_adj", y = otu))
+  p <- p + geom_point(aes(color = diversity, size = seqDepth))
+  print(p)
+}
+
+
+```
+
+
+#Alpha diversity and MDI
+```{r}
+
+div_shan = vegan::diversity(otu_raw, index = "shannon")
+num_species = apply(otu_dds, 1, function(sample) return(sum(sample > 0)))
+div_simp = vegan::diversity(otu_raw, index = "simpson")
+
+df_div = df
+df_div$div_shan = div_shan
+df_div$div_simp = div_simp
+df_div$num_species = num_species
+
+plotCorrelation <- function(div = "div_shan", target = "mdi"){
+  if(target == "mdi"){
+      mod <- lm(df_div$bayley36_mdi_adj ~ df_div[[div]] )
+      plot(df_div[[div]], df_div$bayley36_mdi_adj, ylab = "MDI", xlab = div, main = "MDI as explained by diversity")
+      abline(coefficients(mod), lwd = 2, lty =2, col = "red")
+  }
+  if(target == "pdi"){
+      mod <- lm(df_div$bayley36_pdi_adj ~ df_div[[div]] )
+      plot(df_div[[div]], df_div$bayley36_pdi_adj, ylab = "PDI", xlab = div, main = "PDI as explained by diversity")
+      abline(coefficients(mod), lwd = 2, lty =2, col = "red")
+    
+  }
+}
+
+plotCorrelation(div = "div_shan", target = "mdi")
+plotCorrelation(div = "div_simp", target = "mdi")
+plotCorrelation(div = "num_species", target = "mdi")
+
+plotCorrelation(div = "div_shan", target = "pdi")
+plotCorrelation(div = "div_simp", target = "pdi")
+plotCorrelation(div = "num_species", target = "pdi")
+
+
+cor.test(div_shan, df_div$bayley36_mdi_adj)
+cor.test(num_species, df_div$bayley36_mdi_adj)
+cor.test(div_simp, df_div$bayley36_mdi_adj)
+
+```
+
+
+#Correlation between all 14 microbes
+```{r}
+library(corrplot)
+res <- cor(otu_keep)
+round(res, 3)
+corrplot(res, type = "upper", order = "hclust")
+```
+
+
+
+#Scale of mdi and pdi
+##### The values appear on roughly the same scale, and are lightly correlated
+```{r}
+tmp = data.frame(mdi = df$bayley36_mdi_adj, pdi = df$bayley36_pdi_adj)
+ggplot(melt(tmp)) + geom_boxplot(aes(x = variable, y= value)) + geom_jitter(aes(x = variable, y = value), width = 0.02)
+
+plot(df$bayley36_mdi_adj, df$bayley36_pdi_adj) 
+```
+
+
+#Are maternal and child hair Hg corrrelated?
+#####Not really
+```{r}
+low_mat_thg = df$child_hair_thg[df$maternal_hair_thg_median == 0]
+high_mat_thg = df$child_hair_thg[df$maternal_hair_thg_median == 1]
+boxplot(low_mat_thg, high_mat_thg, names = c("low_mat_thg", "high_mat_thg"))
+```
+
+
+
+#Cluster based on co-occurrence:
+###PDI
+```{r}
+knitr::opts_chunk$set(fig.width=15, fig.height = 13) 
+library(stats)
+set.seed(1)
+
+otu <- t(otu_table(ps_dds))
+otu <- otu[ , colSums(otu)> 0]
+otu <- otu[rownames(df), ]
+
+clustered = kmeans(t(otu), centers = 15, iter.max = 50)
+aggregated = lapply(unique(clustered$cluster), function(cluster) return(rowSums(otu[ , cluster])))
+otu_cooccur_clust = matrix(unlist(aggregated), ncol = length(aggregated), byrow = T)
+otu_cooccur_clust = otu_cooccur_clust[ , colSums(otu_cooccur_clust) > 0]
+colnames(otu_cooccur_clust) <- paste("cluster", 1:ncol(otu_cooccur_clust), sep = "")
+ 
+runLinearTestBasic(y = "bayley36_pdi_adj", df,
+                               otu_mat = otu_cooccur_clust, 
+                               title =  "PDI variance explained using clustered OTUs by co-abundance")
+  
+
+                         
+```
+###MDI
+```{r}
+set.seed(1)
+clustered = kmeans(t(otu), centers = 13, iter.max = 50)
+aggregated = lapply(unique(clustered$cluster), function(cluster) return(rowSums(otu[ , cluster])))
+otu_cooccur_clust = matrix(unlist(aggregated), ncol = length(aggregated), byrow = T)
+otu_cooccur_clust = otu_cooccur_clust[ , colSums(otu_cooccur_clust) > 0]
+colnames(otu_cooccur_clust) <- paste("cluster", 1:ncol(otu_cooccur_clust), sep = "")
+
+runLinearTestBasic(y = "bayley36_mdi_adj", df,
+                               otu_mat = otu_cooccur_clust, 
+                               title =  "MDI variance explained using clustered OTUs by co-abundance")
+```
+
+#Cluster based on co-occurrence using glmnet for feature selection
+##IMPORTANT: We are switching models and now areusing mean squared error. A LOW number means good prediction.
+###PDI
+```{r, warning = F, message=F , results = "hide"}
+library(stats)
+library(glmnet)
+set.seed(1)
+otu <- t(otu_table(ps_dds))
+otu <- otu[ , colSums(otu)> 0]
+otu <- otu[rownames(df), ]
+
+#15 clusters give beautiful results
+#sweet spot is between 14-15
+clustered = kmeans(t(otu), centers = 15, iter.max = 50)
+aggregated = lapply(unique(clustered$cluster), function(cluster) return(rowSums(otu[ , cluster])))
+otu_cooccur_clust = matrix(unlist(aggregated), ncol = length(aggregated), byrow = T)
+otu_cooccur_clust = otu_cooccur_clust[ , colSums(otu_cooccur_clust) > 0]
+colnames(otu_cooccur_clust) <- paste("cluster", 1:ncol(otu_cooccur_clust), sep = "")
+ 
+
+
+models = runLinearTestGlmnet(y = "bayley36_pdi_adj", df = df, otu_mat = otu_cooccur_clust, title = "PDI Mean Squared Error using clustered OTUs by coabundance cross validated feature selection")
+#basic <- models[[1]]
+#basic_merc <- models[[2]] 
+#basic_micro <- models[[3]] 
+#basic_micro_merc <- models[[4]]
+
+```
+
+
+
+###MDI
+```{r}
+#With this model we can't get p values, but we can see which features were informative. The difference is that in this model, instead of looking at R^2, we're looking at the more generalizable metric mean squared error on the held out set using cross-validation. This mens that the features more likely don't just apply to this dataset. It's good that the same features are selected using both models
+
+set.seed(1)
+clustered = kmeans(t(otu), centers = 13, iter.max = 50)
+aggregated = lapply(unique(clustered$cluster), function(cluster) return(rowSums(otu[ , cluster])))
+otu_cooccur_clust = matrix(unlist(aggregated), ncol = length(aggregated), byrow = T)
+otu_cooccur_clust = otu_cooccur_clust[ , colSums(otu_cooccur_clust) > 0]
+colnames(otu_cooccur_clust) <- paste("cluster", 1:ncol(otu_cooccur_clust), sep = "")
+ 
+
+models = runLinearTestGlmnet(y = "bayley36_mdi_adj", df = df, otu_mat = otu_cooccur_clust, title = "MDI Mean Squared Error using clustered OTUs by coabundance cross validated feature selection")
+basic <- models[[1]]
+basic_merc <- models[[2]] 
+basic_micro <- models[[3]] 
+basic_micro_merc <- models[[4]]
+
+#With this model we can't get p values, but we can see which features were informative. The difference is that in this model, instead of looking at R^2, we're looking at the more generalizable metric mean squared error on the held out set using cross-validation. This mens that the features more likely don't just apply to this dataset. It's good that the same features are selected using both models
+
+
+
+```
+
+#Plot cluster membership on tree
+```{r, echo = F, eval = F}
+#TBD: Now that some clusters are selected, we need to know what is in them. 
+clusters <- lapply(unique(clustered$cluster), function(cluster){
+  return(names(clustered$cluster[clustered$cluster == cluster]))
+})
+names(clusters) <- paste("cluster", unique(clustered$cluster), sep = "")
+```
+
+```{r, echo = F, eval = F, fig.height = 20, fig.width = 15}
+plotClustersOnTree <- function(model, i=1){
+  coefs <- coef(model)[,1]
+  coefs <- coefs[coefs != 0]
+  cluster_ids <- names(coefs)[grepl("cluster", names(coefs))]
+  
+  col = ifelse(coefs[cluster_ids][i] > 0, "red", "blue")
+  
+  #Now put the sequences in the clusters on a phylogenetic tree
+  tree <- ape::read.tree("data/tree/phylotree.txt")
+  cluster_by_seq <- lapply(clusters[cluster_ids], function(cluster){
+    return(dict_esv_seq$seq[match(cluster, dict_esv_seq$esv)] )
+  })
+  
+  labels = rep("", length(tree$tip.label))
+  labels[match(cluster_by_seq[[i]] , tree$tip.label)] <- cluster_by_seq[[i]]
+  tree$tip.label <- labels
+
+  plot(tree, tip.color = col, cex = 1, main = names(cluster_by_seq)[i])
+}
+
+plotClustersOnTree(basic_micro, i = 1) 
+plotClustersOnTree(basic_micro, i = 2) 
+```
+
+
+```{r}
+library(ape)
+tree = read.tree('data/tree.newick')
+phy_dists <- cophenetic.phylo(tree)
+```
+
+#Cluster by otus
+```{r}
+library(kmer)
+library(ape)
+
+
+
+getClusteredOtus <- function(otu_clust_obj, seqIDs_){
+  otu_clust_agg <-  lapply(unique(otu_clust_obj), function(clusterID){
+    seqIDs = names(otu_clust_obj[otu_clust_obj == clusterID])
+    representative = seqIDs[grepl("\\*", seqIDs)]
+    seqIDs <- gsub("\\*", "", seqIDs)
+    tmp = rowSums(otu[ , seqIDs_ %in% seqIDs])
+    return(representative = tmp)
+  })
+  
+  repSeqs <-  sapply(unique(otu_clust_obj), function(clusterID){
+    seqIDs = names(otu_clust_obj[otu_clust_obj == clusterID])
+    representative = seqIDs[grepl("\\*", seqIDs)]
+    representative <- gsub("\\*", "", representative)
+    return(representative)
+  })
+  
+  names(otu_clust_agg) <- repSeqs
+  
+  otu_clust_agg_mat <- matrix(unlist(otu_clust_agg), byrow = F, nrow = nrow(otu))
+  rownames(otu_clust_agg_mat) <- rownames(otu)
+  colnames(otu_clust_agg_mat) <- repSeqs
+  
+  
+  otu_clust_agg_mat <- otu_clust_agg_mat[ , colSums(otu_clust_agg_mat) > 0]
+  return(otu_clust_agg_mat)
+}
+
+seqs_ = colnames(otu)
+seqIDs_ = paste("SEQ", seq(1, ncol(otu)), sep = "")
+bin = as.DNAbin(strsplit(colnames(otu), ""))
+otu_99 = otu(bin, threshold = 0.99) #Gives cluster membership
+otu_98 = otu(bin, threshold = 0.98) #Gives cluster membership
+otu_97 = otu(bin, threshold = 0.97) #Gives cluster membership
+otu_95 = otu(bin, threshold = 0.95) #Gives cluster membership
+otu_90 = otu(bin, threshold = 0.90) #Gives cluster membership
+otu_80 = otu(bin, threshold = 0.80) #Gives cluster membership
+otu_75 = otu(bin, threshold = 0.75) #Gives cluster membership
+otu_73 = otu(bin, threshold = 0.73) #Gives cluster membership
+otu_70 = otu(bin, threshold = 0.70) #Gives cluster membership
+
+otu_99_agg_mat <- getClusteredOtus(otu_99, seqIDs_)
+otu_98_agg_mat <- getClusteredOtus(otu_98, seqIDs_)
+otu_97_agg_mat <- getClusteredOtus(otu_97, seqIDs_)
+otu_95_agg_mat <- getClusteredOtus(otu_95, seqIDs_)
+otu_90_agg_mat <- getClusteredOtus(otu_90, seqIDs_)
+otu_80_agg_mat <- getClusteredOtus(otu_80, seqIDs_)
+otu_75_agg_mat <- getClusteredOtus(otu_75, seqIDs_)
+otu_73_agg_mat <- getClusteredOtus(otu_73, seqIDs_)
+otu_70_agg_mat <- getClusteredOtus(otu_70, seqIDs_)
+
+```
+
+##Finding the right level of clustering. We're looking for the point where our information is giving us lower scores than the random columns.
+
+###Run cvglmnet using 99% clustered otus
+```{r, warning=F, results = "hide"}
+
+runLinearTestGlmnet(y = "bayley36_pdi_adj", df = df, otu_mat = otu_99_agg_mat, title = "PDI Mean Squared Error using clustered OTUs at 99% and cross validated feature selection")
+
+```
+
+###Phy cluster 98
+```{r, include = F, eval = F, fig.width = 15, warning = F, message=F , results = "hide"}
+runLinearTestGlmnet(y = "bayley36_pdi_adj", df = df, otu_mat = otu_98_agg_mat, title = "PDI Mean Squared Error using clustered OTUs at 98% and cross validated feature selection")
+```
+
+###Phy cluster 97
+```{r,  fig.width = 15, warning = F, message=F , results = "hide"}
+runLinearTestGlmnet(y = "bayley36_pdi_adj", df = df, otu_mat = otu_97_agg_mat, title = "PDI Mean Squared Error using clustered OTUs at 97% and cross validated feature selection")
+```
+
+###Phy cluster 95
+```{r,  fig.width = 15, warning = F, message=F , results = "hide"}
+runLinearTestGlmnet(y = "bayley36_pdi_adj", df = df, otu_mat = otu_95_agg_mat, title = "PDI Mean Squared Error using clustered OTUs at 95% and cross validated feature selection")
+```
+
+###Phy cluster 90
+```{r, include = F, eval = F, fig.width = 15, warning = F, message=F , results = "hide"}
+runLinearTestGlmnet(y = "bayley36_pdi_adj", df = df, otu_mat = otu_90_agg_mat, title = "PDI Mean Squared Error using clustered OTUs at 90% and cross validated feature selection")
+```
+
+###Phy cluster 80
+```{r,  fig.width = 15, warning = F, message=F , results = "hide"}
+runLinearTestGlmnet(y = "bayley36_pdi_adj", df = df, otu_mat = otu_80_agg_mat, title = "PDI Mean Squared Error using clustered OTUs at 80% and cross validated feature selection")
+```
+
+###Phy cluster 75
+```{r,  fig.width = 15, warning = F, message=F , results = "hide"}
+runLinearTestGlmnet(y = "bayley36_pdi_adj", df = df, otu_mat = otu_75_agg_mat, title = "PDI Mean Squared Error using clustered OTUs at 75% and cross validated feature selection")
+```
+
+###Phy cluster 73
+```{r,  fig.width = 15, warning = F, message=F , results = "hide" }
+
+runLinearTestGlmnet(y = "bayley36_pdi_adj", df = df,  otu_mat = otu_73_agg_mat, title = "PDI Mean Squared Error using clustered OTUs at 73% and cross validated feature selection")
+```
+
+
+
+
+
+
+
+
+
+
+
