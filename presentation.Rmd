@@ -53,22 +53,6 @@ runLinearRegression(y = "bayley36_mdi_adj", ps = ps_common,
 ```
 
 
-#PDI linear regression
-#####How much of PDI score variance can be explained by 1. just metadata 2. metadata and mercury information 3. metadata and microbiome 4. metadata and microbiome and mercury and 5. metadata and random noise variables that match the range of the microbiome and mercury data (equivalent to a null control). And what variables are most valuable in each model?
-```{r, echo=F, warning=F, message=F, fig.width = 15}
-
-df <- getDFMeta()
-runLinearTestBasic(y = "bayley36_pdi_adj", df= df, otu_mat = otu_keep, title =  "PDI variance explained using linear models")
-
-```
-
-#MDI linear regression
-#####How much of PDI score variance can be explained by the same models as above? And which variables are most vaulable in each model?
-```{r, echo=F, warning=F, message=F, fig.width = 15}
-runLinearTestBasic(y = "bayley36_mdi_adj",df = df,  otu_mat = otu_keep, title =  "PDI variance explained using linear models")
-```
-
-
 #Interaction terms: PDI 
 #####We'd like to know if there are interactions between the microbes we identified and the metadata characteristics. For instance, is the influence of sequence 64 more profound if the sample also has high maternal hair mercury concentration? In this model, we don't see any significant interactions
 ```{r, echo=F, warning=F, message=F}
