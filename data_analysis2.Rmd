@@ -1,0 +1,1056 @@
+---
+title: "data_analysis2"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Load data
+```{r}
+library(dplyr)
+library(readr)
+library(phyloseq)
+setwd("C:/Users/ctata/Documents/Lab/methyl-mercury")
+ps <- readRDS("data/ps.RDS")
+ps_dds <- readRDS("data/ps_dds.RDS")
+#mapping <- read_csv("mapping_updated.csv")
+#rownames(mapping) <- mapping$SampleID
+#mapping <- select(mapping, -c(SampleID))
+#sample_data(ps) <- sample_data(mapping)
+```
+
+
+
+#ANOVA on metadata
+```{r}
+
+df <- sample_data(ps)
+vars <- colnames(df)
+vars <- vars[!(vars %in% c("ForwardFastqFile", "ReverseFastqFile", "Description"))]
+df <- df[,vars]
+df <- data.frame(apply(df, 2, function(x) return(x / mean(x, na.rm = T))))
+for(i in seq(1, length(vars))){
+  y <- vars[i]
+  x <- vars
+  x <- x[x!= y]
+
+  tmp <- paste(y, "~")
+  tmp2 <- paste(x, collapse = "+")
+
+  form <- formula(paste(tmp, tmp2, sep = "", collapse = ""))
+  line <- lm(form, data = df)
+  anov <- anova(line)
+  anov$p_adj <- p.adjust(anov$`Pr(>F)`, "fdr")
+  if(sum(anov$p_adj < .1, na.rm = T) > 0){
+     print(anov[anov$p_adj < .1, ])
+  }
+}
+
+
+```
+
+
+#DESeq2 significant test
+```{r}
+#+ child_hair_thg + bayley36_mdi_adj + bayley36_pdi_adj
+
+ps_use <- ps
+df <- sample_data(ps_use)
+df <- na.omit(df)
+sample_data(ps_use) <- df
+sample_data(ps_use)$pdi_binned <- cut(df$bayley36_pdi_adj, breaks = 2)
+sample_data(ps_use)$pdi_binned <- factor(sample_data(ps_use)$pdi_binned, labels = c(0,1))
+
+#ps <- phyloseq::prune_samples(as.vector(!is.na(sample_data(ps)[,criteria])), ps)
+
+library(DESeq2)
+runDESeq <- function(ps_use){
+  diagdds = phyloseq_to_deseq2(ps_use, ~ pdi_binned +  male_1 + hospital_1) 
+  diagdds <- estimateSizeFactors(diagdds, type = "poscounts")
+  print("perform Deseq")
+  diagdds <- DESeq(diagdds,fitType="local", betaPrior = TRUE) 
+  print("calc results")
+  res = results(diagdds, contrast = c("pdi_binned", 1, 0))
+  res$padj[is.na(res$padj)] = 1
+  sig <- res[res$padj <.05,]
+  sigtab <- data.frame(cbind(sig, tax_table(ps)[rownames(sig), ]))
+  return(sigtab)
+}
+sigtab_dds <- runDESeq(ps_use)
+
+```
+
+
+
+
+#Zero-inflated Gaussian
+```{r}
+library(metagenomeSeq)
+run_metagenom_seq<-function(ps,maxit){
+  
+  p_metag<-phyloseq_to_metagenomeSeq(ps)
+  #filtering at least 4 samples 
+  p_metag= cumNorm(p_metag, p=0.75)
+  normFactor =normFactors(p_metag)
+  normFactor =log2(normFactor/median(normFactor) + 1)
+  #mod = model.matrix(~ASDorNeuroT +PairASD+ normFactor)
+  mod = model.matrix(~ pdi_binned + normFactor, data = pData(p_metag))
+  settings =zigControl(maxit = maxit, verbose = TRUE)
+  #settings =zigControl(tol = 1e-5, maxit = 30, verbose = TRUE, pvalMethod = 'bootstrap')
+  fit =fitZig(obj = p_metag, mod = mod, useCSSoffset = FALSE, control = settings)
+  #then finding which tax have to have #38 -> 116: mean 51
+  res_fit<-MRtable(fit, number = length(fit$taxa))
+  res_fit <- res_fit[!is.na(res_fit$pvalues), ]
+  res_fit<-res_fit[res_fit$adjPvalues<0.05,]
+  #finally remove the ones that are not with enough samples
+  #mean_sample<-mean(calculateEffectiveSamples(fit))
+  #res_fit<-res_fit[res_fit$`counts in group 0` & res_fit$`counts in group 1` > mean_sample,]
+  Min_effec_samp<-calculateEffectiveSamples(fit)
+  Min_effec_samp<-Min_effec_samp[ names(Min_effec_samp)  %in% rownames(res_fit)]
+  #res_fit <- res_fit[names(Min_effec_samp), ]
+  res_fit$Min_sample<-Min_effec_samp
+  res_fit<-res_fit[res_fit$`+samples in group 0` >= Min_effec_samp & res_fit$`+samples in group 1` >= Min_effec_samp,]
+  return(res_fit)
+}
+
+
+sigtab_zig <- run_metagenom_seq(ps, maxit = 50)
+if(nrow(sigtab_zig) > 0){
+  sigtab_zig <- data.frame(cbind(sigtab_zig, tax_table(ps)[rownames(sigtab_zig), ]))
+}
+
+```
+
+
+#Get df
+```{r}
+ps_dds <- readRDS("data/ps_dds.RDS")
+df <- sample_data(ps_dds)
+df <- select(df, -c("ForwardFastqFile" , "ReverseFastqFile", "Description", "mdi_median_1","pdi_median_1"))
+df <- na.omit(df)
+#df <- df[df$male_1 == 1,]
+
+merc_vars <- c("child_hair_thg", "maternal_hair_thg_median", "child_hair_thg_median")
+```
+
+#Get otu_keep
+```{r}
+
+#dds_keep <- rownames(sigtab_dds)[sigtab_dds$padj %in% sort(sigtab_dds$padj)[1:15]]
+#zig_keep <- rownames(sigtab_zig)[sigtab_zig$padj %in% sort(sigtab_zig$padj)[1:15]]
+#dds_keep <- rownames(sigtab_dds)[1:13]
+#zig_keep <- rownames(sigtab_zig)[1:8]
+#otu_keep <- t(otu_table(ps_dds))[rownames(df),c(dds_keep, zig_keep)]
+#colnames(otu_keep) <- dict_esv_seq[dict_esv_seq$esv %in% colnames(otu_keep), ]$seq
+
+otu <- t(otu_table(ps_dds))
+dict_esv_seq <- data.frame(cbind(esv = colnames(otu), seq =  paste('seq', seq(1, ncol(otu)), sep ="")))
+taxa_names <- sapply(colnames(otu), function(taxa_name) return(paste(tax_table(ps_dds)[taxa_name, ], collapse = "_")))
+taxa_names <- as.character(taxa_names)
+dict_esv_seq$taxa <- taxa_names
+```
+
+```{r}
+colnames(otu) <- paste('seq', seq(1, ncol(otu)), sep ="")
+keep <- apply(otu, 2, function(taxa_dist) return( sum(taxa_dist > 0) > 12 )) # Keep taxa present in > 25% of samples
+otu_keep <- otu[rownames(df) , keep]
+
+```
+
+
+#Random Forest
+```{r}
+library(randomForest)
+
+
+df_use <- df
+df_tmp <- cbind(df_use, otu_keep)
+colnames(df_tmp) <- c(colnames(df_use), colnames(otu_keep))
+df_use <- df_tmp
+
+y <- df_use$bayley36_pdi_adj
+df_use <- select(df_use, -c("bayley36_pdi_adj", "bayley36_mdi_adj"))
+    
+
+rf <- randomForest(df_use, y = y, replace = T)
+print(rf)
+imp <- importance(rf, scale = T, type = 1)
+varImpPlot(rf, type = 2)
+```
+
+
+#Linear Regression
+#### Setup Linear Regression Helpers
+```{r}
+
+getOther <- function(y){
+  other = ""
+  if(y == "bayley36_mdi_adj"){
+    other = "bayley36_pdi_adj"
+  }
+  if(y == "bayley36_pdi_adj"){
+    other = "bayley36_mdi_adj"
+  }
+  return(other)
+}
+
+getFormula <- function(x, y){
+  #interactions <- paste("male_1", x, sep = ":")
+  #x <- x[x!= "male_1"]
+  vars <- paste(x, collapse = "+")
+  #vars <- paste(vars, "+ (1|male_1)")
+  ind <- paste(y, " ~")
+  form <- formula(paste(ind, vars, sep = ""))
+  return(form)
+}
+```
+
+
+
+
+##Regression Random Noise
+```{r}
+regression_randomNoise <- function(y, method ){
+  other <- getOther(y)
+  df_use <- select(df, -c(other))
+
+  set.seed(0)
+  rsquared_cum <- c()
+  for(perm in seq(1000)){
+    numRands <- 0
+    #add random noise column as control
+    for(i in seq(1, ncol(otu_keep))){
+      tmp <- paste("random", i, sep = "")
+      range_otu <- range(otu_keep[,i])
+      df_use[ , tmp] <- runif(nrow(df_use), min = range_otu[1], max = range_otu[2])
+      numRands = numRands + 1
+    }
+    for(i in seq(1, length(merc_vars))){
+      tmp <- paste('random', i+numRands, sep = "")
+      range_merc <- range(df[ , merc_vars[i]])
+      df_use[ , tmp] <- runif(nrow(df_use), min = range_merc[1], max = range_merc[2])
+    }
+  
+    
+    print(dim(df_use))
+    
+    x <- colnames(df_use)
+    x <- x[x != y]
+    form <- getFormula(x, y)
+    df_stand <- as.data.frame(apply(df_use, 2, function(var) return( (var - mean(var, na.rm = T)) / sd(var, na.rm = T))))
+    
+    if(method == "glm"){
+      fit <- glm(form, df_stand, family = "gaussian")
+      print(fit$aic)
+    }
+    if(method == "basic"){
+      fit <- lm(form, df_stand)
+      print(summary(fit)$adj.r.squared)
+      rsquared <- summary(fit)$adj.r.squared
+    }
+    if(method == "glmnet"){
+      input <- df_stand[,x]
+      target <- df_stand[,y]
+      fit <- glmnet(x = as.matrix(input), target, family = "gaussian")
+      num_lamb <- length(fit$lambda)
+      rsquared <- fit$dev.ratio[num_lamb]
+      print(rsquared)
+    }
+    rsquared_cum <- c(rsquared_cum, rsquared)
+  }
+
+  return(mean(rsquared_cum))
+}
+```
+
+#### Regression function
+```{r}
+library(tibble)
+regression <- function(y, include_otus, include_merc, males, females, method ){
+  other <- getOther(y)
+  df_use <- select(df, -c(other))
+  if(!include_merc){
+    df_use <- select(df_use, -c(merc_vars))
+  }
+  if(males){
+    df_use <- df_use %>% rownames_to_column() %>% filter(male_1 == 1) %>% column_to_rownames()
+    df_use <- select(df_use, -c(male_1))
+  }
+  if(females){
+    df_use <- df_use %>% rownames_to_column() %>% filter(male_1 == 0) %>% column_to_rownames()
+    df_use <- select(df_use, -c(male_1, child_egg_24hr_1, hospital_1))
+  }
+  if(include_otus){
+    #otu_keep <- otu[rownames(df_use) , keep]
+    #df_use <- cbind(df_use, otu_keep)
+    
+    #Use significant otus from deseq and zig tests
+    df_tmp <- cbind(df_use, otu_keep)
+    colnames(df_tmp) <- c(colnames(df_use), colnames(otu_keep))
+    df_use <- df_tmp
+    
+  }
+  
+  print(dim(df_use))
+  
+  x <- colnames(df_use)
+  #x <- c(x, "maternal_hair_thg_median:seq14", "maternal_hair_thg_median:seq10")
+  x <- x[x != y]
+  form <- getFormula(x, y)
+  df_stand <- as.data.frame(apply(df_use, 2, function(var){
+    if(range(var)[1] == 0 & range(var)[2] == 1){
+      return(var)
+    }
+    else{
+      return( (var - mean(var, na.rm = T)) / sd(var, na.rm = T))
+    }
+  }))
+  
+  if(method == "cvglmnet"){
+    input <- df_stand[,x]
+    target <- df_stand[,y]
+    fit <- cv.glmnet(as.matrix(input), target,family = "gaussian")
+    #print(fit$aic)
+  }
+  if(method == "basic"){
+    fit <- lm(form, df_stand)
+    print(summary(fit)$adj.r.squared)
+    fit$rval <- summary(fit)$adj.r.squared
+  }
+  if(method == "glmnet"){
+    input <- df_stand[,x]
+    target <- df_stand[,y]
+    fit <- glmnet(x = as.matrix(input), target, family = "gaussian")
+    num_lamb <- length(fit$lambda)
+    rsquared <- fit$dev.ratio[num_lamb]
+    print(rsquared)
+  }
+
+  return(fit)
+}
+
+#Weird but females are NEVER in the hospital and NEVER had an egg in the last 24 hr. 
+#We can't analyze males and females seperately because we'd have more variables than we do observati. Time to switch over to elastic net for feature extraction
+```
+
+#PlotVariationExplained
+```{r}
+plotVariationExplained <- function(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, basic_random_r, title = ""){
+  tmp <- data.frame(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, basic_random_r)
+  tmp_melt <- melt(tmp)
+  colnames(tmp_melt) <- c("Model", "value")
+  tmp_melt$value <- round(tmp_melt$value, 4)
+  p <- ggplot(tmp_melt, aes(x = Model, y = value, colour = Model, fill = Model)) 
+  p <- p + geom_bar(stat = "identity")
+  p <- p + geom_text(aes(label=value), vjust = -0.3)
+  p <- p + ylab("Variance explained (R^2)")
+  p <- p + ggtitle(title)
+  print(p)
+}
+
+```
+
+#Significant Coefficients function
+```{r}
+getSigCoefs <- function(model){
+  coefs <- summary(model)$coefficients
+  coefs[coefs[,4]  < .07, ]
+}
+
+```
+
+
+#Plot Models
+```{r}
+
+#When we analyze all data together, we see an increase in information when we include mercury data into the model. There is a correlation between being female and having both higher mercury concentration and higher pdi, but we should have already accounted for this with the gender variable. Therefore the added information coming from microbiome data MUST be novel. In fact, the increase from basic to basic + merc is about 11 %, and the increase from basic + micro to all three is about 9 %, so the increase is almost independent of micro information. It's mostly additive.
+plotModels <- function(method, basic, basic_merc, basic_micro, basic_micro_merc, basic_random_r = .38, plottitle = "", s = 'lambda.min'){
+
+  if(method == "glmnet"){
+    num_lamb <- 30
+    basic_r <- basic$dev.ratio[num_lamb]
+    basic_merc_r <- basic_merc$dev.ratio[num_lamb]
+    basic_micro_r <- basic_micro$dev.ratio[num_lamb]
+    basic_micro_merc_r <- basic_micro_merc$dev.ratio[num_lamb]
+  }
+  if(method == "basic"){
+    basic_r <- summary(basic)$adj.r.squared
+    basic_merc_r <- summary(basic_merc)$adj.r.squared
+    basic_micro_r <- summary(basic_micro)$adj.r.squared
+    basic_micro_merc_r <- summary(basic_micro_merc)$adj.r.squared
+    #basic_random_r <- regression_randomNoise("bayley36_pdi_adj", method = "basic")
+    
+  }
+  
+  if(method == "cvglmnet"){
+    basic_r <- basic$glmnet.fit$dev.ratio[which(basic$lambda == basic[[s]])]
+    basic_merc_r <- basic_merc$glmnet.fit$dev.ratio[which(basic_merc$lambda == basic_merc[[s]])]
+    basic_micro_r <- basic_micro$glmnet.fit$dev.ratio[which(basic_micro$lambda == basic_micro[[s]])]
+    basic_micro_merc_r <- basic_micro_merc$glmnet.fit$dev.ratio[which(basic_micro_merc$lambda == basic_micro_merc[[s]])]
+  }
+  
+  
+  plotVariationExplained(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, basic_random_r, title= plottitle)
+}
+#Most of the added information we observe has to do with the male variable. If we take it out, we see a slightly lower basic score, but significantly lower basic + __ model scores, expecially the joined model takes a big hit. I guess this means that not only the mean pdi is different between males and females, but also that the microbiome + mercury phenomenon are different for females and males
+
+#Microbiome can explain 20% of the variance. When paired with mercury data, it can explain 72 % of the variance.
+#In the case of pdi, we may have interaction terms
+
+
+```
+
+
+#PDI linear regression
+```{r}
+library(reshape2)
+library(ggplot2)
+library(glmnet)
+set.seed(1)
+method = "cvglmnet"
+method = "basic"
+basic <- regression("bayley36_pdi_adj", include_otus=F, include_merc=F, males = F, females = F, method = method)
+basic_merc <- regression("bayley36_pdi_adj", include_otus=F, include_merc=T, males = F, females = F, method = method)
+basic_micro <- regression("bayley36_pdi_adj", include_otus=T, include_merc=F, males = F, females = F, method = method)
+basic_micro_merc <- regression("bayley36_pdi_adj", include_otus=T, include_merc=T, males = F, females = F, method = method)
+#basic_random_r <- regression_randomNoise("bayley36_pdi_adj", method)
+
+plotModels(method = method, basic, basic_merc, basic_micro, basic_micro_merc, 0.38, plottitle = "Variance explained using linear models", s= 'lambda.min')
+
+if(method == "basic"){
+  print(getSigCoefs(basic))
+  print(getSigCoefs(basic_merc))
+  print(getSigCoefs(basic_micro))
+  print(getSigCoefs(basic_micro_merc))
+}
+  
+
+```
+
+
+###Significant coefficients after lasso selection
+```{r}
+
+#Select variables using lasso in glmnet
+getVariables <- function(model, s = "lambda.min"){
+  coefs <- coef(model, s = s)
+  vars_to_use <- rownames(coefs)[as.numeric(coefs) != 0]
+  vars_to_use = vars_to_use[vars_to_use != "(Intercept)"]
+  return(vars_to_use)
+}
+```
+
+#GetFullDF
+```{r}
+getFullDF <- function(y){
+  #Get full dataframe
+  df_tmp <- cbind(df, otu_keep)
+  colnames(df_tmp) <- c(colnames(df), colnames(otu_keep))
+  df_use <- df_tmp
+  other <- getOther(y)
+  df_use <- select(df_use, -c(other))
+  df_stand <- as.data.frame(apply(df_use, 2, function(var){
+    if(range(var)[1] == 0 & range(var)[2] == 1){
+      return(var)
+    }
+    else{
+      return( (var - mean(var, na.rm = T)) / sd(var, na.rm = T))
+    }
+  }))
+
+  return(df_stand)
+}
+
+
+```
+
+```{r}
+
+y = "bayley36_pdi_adj"
+df_stand <- getFullDF(y)
+
+basic_vars <- getVariables(basic, s = "lambda.min")
+basic_merc_vars <- getVariables(basic_merc, s = "lambda.min")
+basic_micro_vars <- getVariables(basic_micro, s = "lambda.min")
+basic_micro_merc_vars <- getVariables(basic_micro_merc, s = "lambda.min")
+
+
+basic_lm <- lm(getFormula(basic_vars, y), df_stand)
+basic_merc_lm <- lm(getFormula(basic_merc_vars, y), df_stand)
+basic_micro_lm <- lm(getFormula(basic_micro_vars, y), df_stand)
+basic_micro_merc_lm <- lm(getFormula(basic_micro_merc_vars, y), df_stand)
+
+getSigCoefs(basic_lm)
+getSigCoefs(basic_merc_lm)
+getSigCoefs(basic_micro_lm)
+getSigCoefs(basic_micro_merc_lm)
+
+
+basic_r <- summary(basic_lm)$adj.r.squared
+basic_merc_r <- summary(basic_merc_lm)$adj.r.squared
+basic_micro_r <- summary(basic_micro_lm)$adj.r.squared
+basic_micro_merc_r <- summary(basic_micro_merc_lm)$adj.r.squared
+#basic_random_r <- regression_randomNoise("bayley36_pdi_adj", method = "basic")
+plotVariationExplained(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, .38)
+
+good <- dict_esv_seq %>% filter(seq %in% c("seq2", "seq64"))
+print("GOOD TAXA" )
+print(good$taxa)
+
+
+bad <- dict_esv_seq %>% filter(seq %in% c("seq7", "seq9", "seq16", "seq19"))
+print("BAD TAXA")
+print(bad$taxa)
+
+                                  
+
+
+
+```
+
+#MDI linear regression
+```{r}
+method = "cvglmnet"
+method = "basic"
+basic_mdi <- regression("bayley36_mdi_adj", include_otus=F, include_merc=F, male = F, female = F, method = method)
+basic_merc_mdi <- regression("bayley36_mdi_adj", include_otus=F, include_merc=T, male = F, female = F,  method = method)
+basic_micro_mdi <- regression("bayley36_mdi_adj", include_otus=T, include_merc=F, male = F, female = F,  method = method)
+basic_micro_merc_mdi <- regression("bayley36_mdi_adj", include_otus=T, include_merc=T, male = F, female = F,  method = method)
+#basic_random <- regression("bayley36_mdi_adj", include_otus=F, include_merc=F, male = F, female = F,  method = method, random = T)
+
+plotModels(method, basic_mdi, basic_merc_mdi, basic_micro_mdi, basic_micro_merc_mdi, s = 'lambda.min')
+
+if(method == "basic"){
+  print(getSigCoefs(basic_mdi))
+  print(getSigCoefs(basic_merc_mdi))
+  print(getSigCoefs(basic_micro_mdi))
+  print(getSigCoefs(basic_micro_merc_mdi))
+}
+#plotVariationExplained(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, basic_random_r)
+
+#The microbiome is predictive to some extent (5%) of the variance in mdi score
+```
+
+###Significant coefficients after lasso selection
+```{r}
+
+
+y = "bayley36_mdi_adj"
+df_stand <- getFullDF(y)
+
+
+basic_vars <- getVariables(basic_mdi, s= 'lambda.min')
+basic_merc_vars <- getVariables(basic_merc_mdi,  s= 'lambda.min')
+basic_micro_vars <- getVariables(basic_micro_mdi,  s= 'lambda.min')
+basic_micro_merc_vars <- getVariables(basic_micro_merc_mdi,  s= 'lambda.min')
+
+
+basic_lm <- lm(getFormula(basic_vars, y), df_stand)
+basic_merc_lm <- lm(getFormula(basic_merc_vars, y), df_stand)
+basic_micro_lm <- lm(getFormula(basic_micro_vars, y), df_stand)
+basic_micro_merc_lm <- lm(getFormula(basic_micro_merc_vars, y), df_stand)
+
+getSigCoefs(basic_lm)
+getSigCoefs(basic_merc_lm)
+getSigCoefs(basic_micro_lm)
+getSigCoefs(basic_micro_merc_lm)
+
+
+basic_r <- summary(basic_lm)$adj.r.squared
+basic_merc_r <- summary(basic_merc_lm)$adj.r.squared
+basic_micro_r <- summary(basic_micro_lm)$adj.r.squared
+basic_micro_merc_r <- summary(basic_micro_merc_lm)$adj.r.squared
+#basic_random_r <- regression_randomNoise("bayley36_pdi_adj", method = "basic")
+plotVariationExplained(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, .38)
+
+good <- dict_esv_seq %>% filter(seq %in% c("seq1", "seq21"))
+print(good$taxa)
+bad <- dict_esv_seq %>% filter(seq %in% c("seq4"))
+print(bad$taxa)
+
+
+```
+
+#Interaction terms: 
+```{r}
+#Are there interactions between the significant taxa and any of the significant metadata
+
+y = "bayley36_pdi_adj"
+df_stand <- getFullDF(y)
+vars <- c("male_1", "zhuang_1", "breastfeeding_median", "maternal_hair_thg_median", "child_fishshrimp_24hr_1", "hospital_1", "upperresp_1")
+seqvars <- c("seq7", "seq9", "seq16", "seq64")
+
+interactions <- c()
+for(seq in seqvars){
+  interactions <- c(interactions, paste(seq, ":", vars, sep = ""))
+}
+
+allvars <- c(vars, seqvars, interactions)
+form <- getFormula(interactions, y)
+fit <- lm(form, df_stand)
+
+print(summary(fit)$coefficients)
+print(summary(fit_inter)$coefficients)
+
+```
+#Interaction terms: Linear Mixed Model
+```{r}
+library(lme4)
+vars <- c("male_1", "zhuang_1", "breastfeeding_median", "maternal_hair_thg_median", "child_fishshrimp_24hr_1", "seq7", "seq9", "seq16", "seq64", "(seq64|maternal_hair_thg_median)")
+form <- getFormula(vars, y)
+df_stand <- getFullDF(y)
+fit <- lmer(form, df_stand)
+
+
+```
+
+
+#Lasso select taxa PDI
+```{r}
+#Right now we're selecting the most abundant. Can we do better by lasso selecting taxa and then doing linear regression for p values
+keep <- apply(otu, 2, function(taxa_dist) return( sum(taxa_dist > 0) > 5 )) # Keep taxa present in > 25% of samples
+otu_keep <- otu[rownames(df) , keep]
+
+method = "cvglmnet"
+basic <- regression("bayley36_pdi_adj", include_otus=F, include_merc=F, males = F, females = F, method = method)
+basic_merc <- regression("bayley36_pdi_adj", include_otus=F, include_merc=T, males = F, females = F, method = method)
+basic_micro <- regression("bayley36_pdi_adj", include_otus=T, include_merc=F, males = F, females = F, method = method)
+basic_micro_merc <- regression("bayley36_pdi_adj", include_otus=T, include_merc=T, males = F, females = F, method = method)
+#basic_random <- regression("bayley36_pdi_adj", include_otus=F, include_merc=F, males = F, females = F, method = method, random_noise = T)
+
+plotModels(method = method, basic, basic_merc, basic_micro, basic_micro_merc, plottitle = "Variance explained using cvglmnet", s= 'lambda.min')
+
+
+y = "bayley36_pdi_adj"
+df_stand <- getFullDF(y)
+
+#Get selected variables
+basic_vars <- getVariables(basic, s = "lambda.min")
+basic_merc_vars <- getVariables(basic_merc, s = "lambda.min")
+basic_micro_vars <- getVariables(basic_micro, s = "lambda.min")
+basic_micro_merc_vars <- getVariables(basic_micro_merc, s = "lambda.min")
+
+#Train OLS on those variables
+basic_lm <- lm(getFormula(basic_vars, y), df_stand)
+basic_merc_lm <- lm(getFormula(basic_merc_vars, y), df_stand)
+basic_micro_lm <- lm(getFormula(basic_micro_vars, y), df_stand)
+basic_micro_merc_lm <- lm(getFormula(basic_micro_merc_vars, y), df_stand)
+
+#Get coefficients with significant p values
+print(getSigCoefs(basic_lm))
+print(getSigCoefs(basic_merc_lm))
+print(getSigCoefs(basic_micro_lm))
+print(getSigCoefs(basic_micro_merc_lm))
+
+
+#Plot the final results
+basic_r <- summary(basic_lm)$adj.r.squared
+basic_merc_r <- summary(basic_merc_lm)$adj.r.squared
+basic_micro_r <- summary(basic_micro_lm)$adj.r.squared
+basic_micro_merc_r <- summary(basic_micro_merc_lm)$adj.r.squared
+#basic_random_r <- regression_randomNoise("bayley36_pdi_adj", method = "basic")
+plotVariationExplained(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, .38)
+
+good <- dict_esv_seq %>% filter(seq %in% c("seq66"))
+print("GOOD TAXA" )
+print(good$taxa)
+
+
+bad <- dict_esv_seq %>% filter(seq %in% c("seq161"))
+print("BAD TAXA")
+print(bad$taxa)
+
+```
+
+#Lasso select taxa MDI
+```{r}
+#Right now we're selecting the most abundant. Can we do better by lasso selecting taxa and then doing linear regression for p values
+set.seed(0)
+keep <- apply(otu, 2, function(taxa_dist) return( sum(taxa_dist > 0) > 5 )) # Keep taxa present in > 25% of samples
+otu_keep <- otu[rownames(df) , keep]
+
+method = "cvglmnet"
+basic <- regression("bayley36_mdi_adj", include_otus=F, include_merc=F, males = F, females = F, method = method)
+basic_merc <- regression("bayley36_mdi_adj", include_otus=F, include_merc=T, males = F, females = F, method = method)
+basic_micro <- regression("bayley36_mdi_adj", include_otus=T, include_merc=F, males = F, females = F, method = method)
+basic_micro_merc <- regression("bayley36_mdi_adj", include_otus=T, include_merc=T, males = F, females = F, method = method)
+#basic_random <- regression("bayley36_mdi_adj", include_otus=F, include_merc=F, males = F, females = F, method = method, random_noise = T)
+
+plotModels(method = method, basic, basic_merc, basic_micro, basic_micro_merc, plottitle = "Variance explained using cvglmnet", s= 'lambda.min')
+
+
+y = "bayley36_mdi_adj"
+df_stand <- getFullDF(y)
+
+#Get selected variables
+basic_vars <- getVariables(basic, s = "lambda.min")
+basic_merc_vars <- getVariables(basic_merc, s = "lambda.min")
+basic_micro_vars <- getVariables(basic_micro, s = "lambda.min")
+basic_micro_merc_vars <- getVariables(basic_micro_merc, s = "lambda.min")
+
+#Train OLS on those variables
+basic_lm <- lm(getFormula(basic_vars, y), df_stand)
+basic_merc_lm <- lm(getFormula(basic_merc_vars, y), df_stand)
+basic_micro_lm <- lm(getFormula(basic_micro_vars, y), df_stand)
+basic_micro_merc_lm <- lm(getFormula(basic_micro_merc_vars, y), df_stand)
+
+#Get coefficients with significant p values
+print(getSigCoefs(basic_lm))
+print(getSigCoefs(basic_merc_lm))
+print(getSigCoefs(basic_micro_lm))
+print(getSigCoefs(basic_micro_merc_lm))
+
+
+#Plot the final results
+basic_r <- summary(basic_lm)$adj.r.squared
+basic_merc_r <- summary(basic_merc_lm)$adj.r.squared
+basic_micro_r <- summary(basic_micro_lm)$adj.r.squared
+basic_micro_merc_r <- summary(basic_micro_merc_lm)$adj.r.squared
+#basic_random_r <- regression_randomNoise("bayley36_mdi_adj", method = "basic")
+plotVariationExplained(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, .38)
+
+good <- dict_esv_seq %>% filter(seq %in% c("seq66"))
+print("GOOD TAXA" )
+print(good$taxa)
+
+
+bad <- dict_esv_seq %>% filter(seq %in% c("seq161"))
+print("BAD TAXA")
+print(bad$taxa)
+
+
+#We get no taxa chosen from glmnet (depending on the random seed)
+```
+
+
+
+
+
+
+
+#Boxplots
+```{r}
+df_use <- cbind(df, otu_keep)
+df_use$sampleid <- paste("Sample", seq(1, nrow(df_use)), sep = "")
+df_use$pdi_binned <- cut(df_use$bayley36_pdi_adj, breaks = 2)
+df_use$pdi_binned <- factor(df_use$pdi_binned, labels = c(0,1))
+df_melt <- melt(df_use, "sampleid")
+
+otus <- paste("seq", seq(1,14), sep = "")
+for(otu in otus){
+  print(otu)
+  p <- ggplot(df_use, aes_string("pdi_binned", y = otu))
+  p <- p + geom_boxplot() + geom_jitter()
+  print(p)
+}
+
+```
+
+
+
+
+#PERMANOVA
+```{r}
+library(vegan)
+dist_bray <- vegdist(otu[rownames(df), ], method = "bray")
+vars <- paste(colnames(df), collapse = "+")
+form <-  formula(paste("dist_bray ~", vars))
+perm = adonis2(form, data = as.data.frame(df), method = "bray", perm = 9999)
+perm
+#Having a farmer mother can explain .06 percent of the variance in the microbiome. Being a male can explain .045% of it. 
+```
+
+
+
+
+#Question left to answer: Are the microbes that can explain the pdi/mdi (14 of the most common) explaining variance because they explain a correlated covariate, or because the explain the actual pdi/mdi score.
+
+#Assume that the microbes are explaining a correlated covariate. Then taking away that covariate from the model should not decrease model accuracy, because most of the information is saved in the microbiome. Taking away the covariate might also not decrease model accuracy because the covariate is useless. (IF  ACCURACY DOES NOT DECREASE IT COULD BE BECAUSE THE VARIABLE IS USELESS (basic hasn't changed) OR BECAUSE THE MICROBIOME IS MAKING UP FOR IT. CHECK THE BASIC PREDICTION ACCURACY TO TELL THE DIFFERENCE)
+
+#If their information is independent, then removing variables from the basic information will result in a decrease in model accuracy. (IF ACCURACY DOES DECREASE, THE VARIABLE IS IMPORTANT AND IS NOT REPRESENTED THROUGH MICROBIOME DATA)
+
+
+```{r}
+df_save <- df
+```
+
+```{r}
+getPDIModel <- function(removed){
+  method = "basic"
+  basic <- regression("bayley36_pdi_adj", include_otus=F, include_merc=F, males = F, females = F, method = method, random_noise = F)
+  basic_merc <- regression("bayley36_pdi_adj", include_otus=F, include_merc=T, males = F, females = F, method = method, random_noise = F)
+  basic_micro <- regression("bayley36_pdi_adj", include_otus=T, include_merc=F, males = F, females = F, method = method, random_noise = F)
+  basic_micro_merc <- regression("bayley36_pdi_adj", include_otus=T, include_merc=T, males = F, females = F, method = method, random_noise = F)
+  
+  basic_r <- summary(basic)$adj.r.squared
+  basic_merc_r <- summary(basic_merc)$adj.r.squared
+  basic_micro_r <- summary(basic_micro)$adj.r.squared
+  basic_micro_merc_r <- summary(basic_micro_merc)$adj.r.squared
+  #basic_random_r <- regression_randomNoise("bayley36_pdi_adj", method = "basic")
+    
+  plotVariationExplained(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, basic_random_r, title = removed)
+}
+
+```
+
+```{r}
+getMDIModel <- function(removed){
+  method = "basic"
+  basic <- regression("bayley36_mdi_adj", include_otus=F, include_merc=F, males = F, females = F, method = method, random_noise = F)
+  basic_merc <- regression("bayley36_mdi_adj", include_otus=F, include_merc=T, males = F, females = F, method = method, random_noise = F)
+  basic_micro <- regression("bayley36_mdi_adj", include_otus=T, include_merc=F, males = F, females = F, method = method, random_noise = F)
+  basic_micro_merc <- regression("bayley36_mdi_adj", include_otus=T, include_merc=T, males = F, females = F, method = method, random_noise = F)
+  
+  basic_r <- summary(basic)$adj.r.squared
+  basic_merc_r <- summary(basic_merc)$adj.r.squared
+  basic_micro_r <- summary(basic_micro)$adj.r.squared
+  basic_micro_merc_r <- summary(basic_micro_merc)$adj.r.squared
+  #basic_random_r <- regression_randomNoise("bayley36_pdi_adj", method = "basic")
+    
+  plotVariationExplained(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, basic_random_r, title = removed)
+}
+
+```
+
+#Marginal Variance Explained (remove one variable at a time)
+```{r}
+ps_dds <- readRDS("data/ps_dds.RDS")
+df <- sample_data(ps_dds)
+df <- select(df, -c("ForwardFastqFile" , "ReverseFastqFile", "Description", "mdi_median_1","pdi_median_1"))
+df <- na.omit(df)
+#df <- df[df$male_1 == 1,]
+df_save <- df
+
+info <- c("TreatmentGroup", "male_1", "upperresp_1", "fever_1", "illness_1", "hospital_1", "mother_farmer_1", "zhuang_1", "mother_hs_univ", "breastfeeding_median", "child_fishshrimp_24hr_1", "child_tofusoymilk_24hr_1", "child_cowsmilk_24hr_1", "child_egg_24hr_1")
+for(to_remove_info in info){
+  df <- select(df_save, -c(to_remove_info))
+  getPDIModel(to_remove_info)
+}
+df <- df_save
+getPDIModel("None")
+
+```
+#Remove Unimportant variables
+```{r}
+to_remove_info <- c("TreatmentGroup", "illness_1", "mother_hs_univ", "child_tofusoymilk_24hr_1", "child_cowsmilk_24hr_1", "child_egg_24hr_1")
+df <- select(df_save, -c(to_remove_info))
+getPDIModel(to_remove_info)
+  
+```
+
+
+
+
+#Marginal Variance Explained (remove one variable at a time)
+```{r}
+ps_dds <- readRDS("data/ps_dds.RDS")
+df <- sample_data(ps_dds)
+df <- select(df, -c("ForwardFastqFile" , "ReverseFastqFile", "Description", "mdi_median_1","pdi_median_1"))
+df <- na.omit(df)
+#df <- df[df$male_1 == 1,]
+df_save <- df
+
+info <- c("TreatmentGroup", "male_1", "upperresp_1", "fever_1", "illness_1", "hospital_1", "mother_farmer_1", "zhuang_1", "mother_hs_univ", "breastfeeding_median", "child_fishshrimp_24hr_1", "child_tofusoymilk_24hr_1", "child_cowsmilk_24hr_1", "child_egg_24hr_1")
+for(to_remove_info in info){
+  df <- select(df_save, -c(to_remove_info))
+  getMDIModel(to_remove_info)
+}
+df <- df_save
+getMDIModel("None")
+
+```
+
+
+
+#### Mixed Effect
+```{r}
+library(tibble)
+getFormulaMixed <- function(x, y){
+  vars <- paste(x, collapse = "+")
+  vars <- paste(vars, "+ (1 + seq3|male_1) ")
+  ind <- paste(y, " ~")
+  form <- formula(paste(ind, vars, sep = ""))
+  return(form)
+}
+
+mixedEffect <- function(y, include_otus, include_merc){
+  other <- getOther(y)
+  df_use <- select(df, -c(other))
+  if(!include_merc){
+    df_use <- select(df_use, -c(merc_vars))
+  }
+  if(include_otus){
+    df_tmp <- cbind(df_use, otu_keep)
+    colnames(df_tmp) <- c(colnames(df_use), colnames(otu_keep))
+    df_use <- df_tmp
+    
+  }
+
+  print(dim(df_use))
+  
+  x <- colnames(df_use)
+  x <- x[x != "male_1"]
+  x <- x[x != y]
+  form <- getFormulaMixed(x, y)
+  #form <- getFormulaMixed(c(), y)
+  #form <- "bayley36_pdi_adj ~ (1 + seq2|male_1)"
+  df_stand <- as.data.frame(apply(df_use, 2, function(var) return( (var - mean(var, na.rm = T)) / sd(var, na.rm = T))))
+  
+  fit <- lmer(form, data = df_use, REML = T)
+  return(fit)
+}
+#fit <- mixedEffect(y="bayley36_pdi_adj", include_otus = F, include_merc = F )
+#fit2 <- mixedEffect(y="bayley36_pdi_adj", include_otus = F, include_merc = T )
+#fit3 <- mixedEffect(y="bayley36_pdi_adj", include_otus = T, include_merc = F)
+fit4 <- mixedEffect(y="bayley36_pdi_adj", include_otus = T, include_merc = T)
+anova(fit, fit2, fit3, fit4)
+
+#Weird but females are NEVER in the hospital and NEVER had an egg in the last 24 hr. 
+#We can't analyze males and females seperately because we'd have more variables than we do observati. Time to switch over to elastic net for feature extraction
+```
+
+```{r}
+df <- df_save
+method = "basic"
+basic <- regression("bayley36_pdi_adj", include_otus=F, include_merc=F, males = F, females = F, method = method, random_noise = F)
+basic_merc <- regression("bayley36_pdi_adj", include_otus=F, include_merc=T, males = F, females = F, method = method, random_noise = F)
+basic_micro <- regression("bayley36_pdi_adj", include_otus=T, include_merc=F, males = F, females = F, method = method, random_noise = F)
+basic_micro_merc <- regression("bayley36_pdi_adj", include_otus=T, include_merc=T, males = F, females = F, method = method, random_noise = F)
+
+basic_r <- summary(basic)$adj.r.squared
+basic_merc_r <- summary(basic_merc)$adj.r.squared
+basic_micro_r <- summary(basic_micro)$adj.r.squared
+basic_micro_merc_r <- summary(basic_micro_merc)$adj.r.squared
+#basic_random_r <- regression_randomNoise("bayley36_pdi_adj", method = "basic")
+  
+plotVariationExplained(basic_r, basic_merc_r, basic_micro_r, basic_micro_merc_r, basic_random_r, title = removed)
+```
+
+
+
+#Phylogenetic tree
+```{r}
+#got tree from clustalWal online
+tree <- ape::read.tree("data/tree/phylotree.txt")
+seqvars <- c("seq7", "seq9", "seq16", "seq64")
+
+
+ps <- readRDS("data/ps.RDS")
+taxa_names(ps) <- dict_esv_seq$seq
+phy_tree(ps) <- tree
+
+ps_filt <- filter_taxa(ps, function(abund) return(sum(abund > 0) > 8), prune = T)
+plot_tree(ps_filt, label.tips = "taxa_names")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#ClaaTu
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+#Clustering based on Jenson-Shannon index
+```{r}
+library(cluster)
+library(ggfortify) 
+library(readr)
+library(dplyr)
+
+ps_dds <- readRDS("data/ps_dds.RDS")
+ps_log <- readRDS("data/ps_log.RDS")
+ps <- readRDS("data/ps.RDS")
+ps_css <- readRDS("data/ps_css.RDS")
+
+mapping <- read_csv("mapping_updated.csv")
+rownames(mapping) <- mapping$SampleID
+mapping <- select(mapping, -c(SampleID))
+sample_data(ps_dds) <- sample_data(mapping)
+
+
+method = "jsd"
+dist_jsd_log <- phyloseq::distance(ps_log, method = method)
+dist_jsd_dds <- phyloseq::distance(ps_dds, method = method)
+dist_jsd_css <- phyloseq::distance(ps_css, method = method)
+mds_log <- cmdscale(as.matrix(dist_jsd_log), eig = T, k=2)
+mds_dds <- cmdscale(as.matrix(dist_jsd_dds), eig = T, k=2)
+mds_css <- cmdscale(as.matrix(dist_jsd_css), eig = T, k=2)
+
+
+method = "bray"
+dist_bray_log <- phyloseq::distance(ps_log, method = method)
+dist_bray_dds <- phyloseq::distance(ps_dds, method = method)
+dist_bray_css <- phyloseq::distance(ps_css, method = method)
+mds_bray_log <- cmdscale(as.matrix(dist_bray_log), eig = T, k=2)
+mds_bray_dds <- cmdscale(as.matrix(dist_bray_dds), eig = T, k=2)
+mds_bray_css <- cmdscale(as.matrix(dist_bray_css), eig = T, k=2)
+
+```
+
+```{r}
+
+plotMDS <- function(mds, ps){
+  x <- mds$points[,1]
+  y <- mds$points[,2]
+  
+  df <- cbind(x, y, sample_data(ps))
+  for (colname in colnames(df)[5:23]){
+    df[,colname] = as.factor(df[,colname])
+  }
+  plots = list()
+  p = 1
+  for(i in seq(5, ncol(df))){
+    criteria = colnames(df)[i]
+    plots[[p]] <- ggplot(df, aes_string(x = "x",y="y", color = criteria)) + geom_point(size = 9) + labs(title = criteria)
+    p = p + 1
+    #colours = ifelse(sample_data(ps)[,criteria] == 1, "blue", "red")
+    #plot(x,y, main = criteria)
+    #text(x, y, labels = rownames(as.matrix(dist_jsd)), cex = 0.7, col = colours)
+  }
+  plots
+
+}
+
+```
+
+```{r}
+plotMDS(mds_bray_log, ps_log)
+```
+
+
+```{r}
+plotMDS(mds_dds, ps_dds)
+
+```
+
+```{r}
+plotMDS(mds_css, ps_css)
+```
+
+
+```{r}
+plotMDS(mds_log, ps_log)
+```
