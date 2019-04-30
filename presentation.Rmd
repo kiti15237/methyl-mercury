@@ -25,13 +25,7 @@ ps_dds_common <- cleanSampleData(ps_dds_common)
 ps_common <- cleanSampleData(ps_common)
 
 otu_table(ps_common) <- asinh(otu_table(ps_common))
-#otu_table(ps) <- asinh(otu_table(ps))
-#ps_10 <- getCommonOtus(ps, numSamples = 10)
-#ps_5 <- getCommonOtus(ps, numSamples = 5)
-#ps_1 <- getCommonOtus(ps, numSamples = 1)
-#ps <- prune_samples(colSums(otu_table(ps_dds_common)) > 0, ps_dds_common)
 
-#Try normalizing with asinh
 ```
 
 
@@ -53,69 +47,11 @@ runLinearRegression(y = "bayley36_mdi_adj", ps = ps_common,
 ```
 
 
-#Interaction terms: PDI 
-#####We'd like to know if there are interactions between the microbes we identified and the metadata characteristics. For instance, is the influence of sequence 64 more profound if the sample also has high maternal hair mercury concentration? In this model, we don't see any significant interactions
-```{r, echo=F, warning=F, message=F}
-#Are there interactions between the significant taxa and any of the significant metadata
-
-y = "bayley36_pdi_adj"
-df_stand <- getFullDF(y)
-vars <- c("male_1", "zhuang_1", "breastfeeding_median", "maternal_hair_thg_median", "child_fishshrimp_24hr_1", "hospital_1", "upperresp_1")
-seqvars <- c("seq7", "seq9", "seq16", "seq64")
-
-interactions <- c()
-for(seq in seqvars){
-  interactions <- c(interactions, paste(seq, ":", vars, sep = ""))
-}
-
-allvars <- c(vars, seqvars, interactions)
-form <- getFormula(allvars, y)
-fit <- lm(form, df_stand)
-
-print(summary(fit)$coefficients)
-
-```
-
-#Interaction terms: MDI
-##### We don't see significant interactions between the sequences associated with MDI scores and fish consumption, which is the only significant metadata variable. We do see a disappearance of significance of fish consumption when we include microbiome data, which makes us think that maybe there is information in the microbiome that accounts for the information originall provided by fish consumption. We look for correlation and find that seq1 is pretty significantly correlated with fish consumption, as expected
-```{r, echo=F, warning=F, message=F}
-#Are there interactions between the significant taxa and any of the significant metadata
-
-
-y = "bayley36_mdi_adj"
-other <- getOther(y)
-vars <- c("child_fishshrimp_24hr_1")
-seqvars <- c("seq1", "seq21")
-df_stand <- getFullDF(y)
-df_meta <- getDFMeta()
-
-interactions <- c()
-for(seq in seqvars){
-  interactions <- c(interactions, paste(seq, ":", vars, sep = ""))
-}
-vars <- colnames(df)[!(colnames(df) %in% c( other))]
-
-allvars <- c(vars, seqvars, interactions)
-form <- getFormula(allvars, y)
-fit <- lm(form, df_stand)
-
-print(summary(fit)$coefficients)
-
-print(cor.test(as.numeric(otu_keep[ , 'seq1']), df$child_fishshrimp_24hr_1))
-print(cor.test(as.numeric(otu_keep[ , 'seq21']), df$child_fishshrimp_24hr_1))
-print(paste("seq1: ", dict_esv_seq$taxa[dict_esv_seq$seq == 'seq1']))
-```
-
-
 
 #PERMANOVA
 #####Asking the reverse question - how much of the microbiomes structure differences can be explained by each lifestyle characteristic. Note we're using just the top 14 most abundant otus (present in > 25% of samples). Having a farmer mother can explain 6% of the variance and being a male can explain 4.5%. 
 ```{r, echo=F, warning=F, message=F}
-library(vegan)
-dist_bray <- vegdist(otu_keep[rownames(df), ], method = "bray")
-vars <- paste(colnames(df), collapse = "+")
-form <-  formula(paste("dist_bray ~", vars))
-perm = adonis2(form, data = as.data.frame(df), method = "bray", perm = 9999)
+perm <- runPermanova(ps_dds_common, method = "bray")
 perm
 #Having a farmer mother can explain .06 percent of the variance in the microbiome. Being a male can explain .045% of it. 
 ```
@@ -123,13 +59,33 @@ perm
 
 #####Now the same test but using all otus instead of the top 14
 ```{r}
-dist_bray <- vegdist(otu[rownames(df), ], method = "bray")
-vars <- paste(colnames(df), collapse = "+")
-form <-  formula(paste("dist_bray ~", vars))
-perm = adonis2(form, data = as.data.frame(df), method = "bray", perm = 9999)
-perm
+perm_all <- runPermanova(ps_dds, method = "bray")
+perm_all
+```
+#
+#Constrained correspondence
+````{r}
+dist  <- phyloseq::distance(physeq = ps_common, method = "bray")
+plotCCA(ps_common, color = "bayley36_mdi_adj")
+plotCCA(ps_common, color = "bayley36_pdi_adj")
+
 ```
 
+#####Biplot
+```{r}
+ps_common <- getCommonOtus(ps_dds, numSamples = 12)
+ps_common <- cleanSampleData(ps_common)
+ps_common <- prune_taxa(taxa_sums(ps_common) > 0, ps_common)
+ps_common <- prune_samples(sample_sums(ps_common) > 0, ps_common)
+
+cca <- ordinate(ps_common, "DPCoA")
+plot_scree(cca, "Scree Plot for Global Patterns Correspondence Analysis")
+
+plot_ordination(ps_dds_common, cca, type = "split", color="bayley36_mdi_adj", shape = "Genus") + geom_point(size=5)
+```
+
+
+####
 
 #Phylogenetic tree
 ##### Of the taxa that were labeled as "valuable" in the above models (seq7, seq9, seq16, seq64), the first three were associated with lower pdi and the last was associated with higher. We'd like to see where they fall on the phylogenetic tree. Red means negatively associated with pdi, and green means positively associated
@@ -441,6 +397,7 @@ library(ape)
 
 
 getClusteredOtus <- function(otu_clust_obj, seqIDs_){
+  #set otu = your otu table
   otu_clust_agg <-  lapply(unique(otu_clust_obj), function(clusterID){
     seqIDs = names(otu_clust_obj[otu_clust_obj == clusterID])
     representative = seqIDs[grepl("\\*", seqIDs)]

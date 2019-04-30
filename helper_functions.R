@@ -4,7 +4,7 @@ library(phyloseq)
 library(reshape2)
 library(ggplot2)
 library(glmnet)
-
+library(vegan)
 
 
 
@@ -15,7 +15,7 @@ loadPhyloseq <- function(dir){
 }
 
 cleanSampleData <- function(ps){
-  df <- sample_data(ps_dds)
+  df <- sample_data(ps)
   df <- select(df, -c("ForwardFastqFile" , "ReverseFastqFile", "Description", "mdi_median_1","pdi_median_1"))
   df <- na.omit(df)
   sample_data(ps) <- df
@@ -31,7 +31,7 @@ getCommonOtus <- function(ps, numSamples){
   }
   keep <- apply(otu, 1, function(taxa_dist) return(sum(taxa_dist > 0) > numSamples))# Keep taxa present in > 25% of samples
   ps_filt <- prune_taxa(keep, ps)
-  ps_filt <- prune_samples(colSums(otu_table(ps_filt)) > 0, ps_filt) #Drop samples that are empty
+ # ps_filt <- prune_samples(colSums(otu_table(ps_filt)) > 0, ps_filt) #Drop samples that are empty
   
   names <- apply(tax_table(ps_filt), 1, function(phy_names){
     return(paste(tax_table(ps_filt)[1,], collapse = "_"))
@@ -319,3 +319,65 @@ runLinearRegression <- function(y, ps, method, permutations, title = ""){
   print(getSigCoefs(basic_all, method))
   return(list(basic, basic_merc, basic_otu, basic_all))
 }
+
+runPermanova <- function(ps, method){
+  otu <- otu_table(ps)
+  if(nrow(otu) < ncol(otu)){
+    otu <- t(otu) #want samples as rows
+  }
+  dist_bray <- vegdist(otu, method = method)
+  vars <- paste(sample_variables(ps), collapse = "+")
+  form <-  formula(paste("dist_bray ~", vars))
+  perm = adonis2(form, data = as.data.frame(sample_data(ps)), method = "bray", perm = 9999)
+}
+
+plotCCA <- function(ps, color){
+  vars <- paste(colnames(sample_data(ps)), collapse = "+")
+  ind <- paste("~")
+  form <- formula(paste(ind, vars, sep = ""))
+  cca <- ordinate(physeq = ps, method = "CAP", distance = dist, formula = form)
+  
+  cap_plot <- plot_ordination(physeq = ps, 
+                              ordination = cca, 
+                              color = color, 
+                              axes = c(1,2))
+  
+  cap_plot <- cap_plot + geom_point(size = 5)
+  arrowmat <- vegan::scores(cca, display = "bp")
+  # Add labels, make a data.frame
+  arrowdf <- data.frame(labels = rownames(arrowmat), arrowmat)
+  # Define the arrow aesthetic mapping
+  arrow_map <- aes(xend = CAP1 * 3, 
+                   yend = CAP2 * 3, 
+                   x = 0, 
+                   y = 0, 
+                   shape = NULL, 
+                   color = NULL, 
+                   label = labels)
+  
+  label_map <- aes(x = 3.5 * CAP1, 
+                   y = 3.5 * CAP2, 
+                   shape = NULL, 
+                   color = NULL, 
+                   label = labels)
+  
+  arrowhead = arrow(length = unit(0.02, "npc"))
+  
+  # Make a new graphic
+  cap_plot <- cap_plot + 
+    geom_segment(
+      mapping = arrow_map, 
+      size = .5, 
+      data = arrowdf, 
+      color = "gray", 
+      arrow = arrowhead
+    ) + 
+    geom_text(
+      mapping = label_map, 
+      size = 4,  
+      data = arrowdf, 
+      show.legend = FALSE
+    )
+  return(cap_plot)
+}
+
