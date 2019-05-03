@@ -11,77 +11,76 @@ knitr::opts_chunk$set(fig.width=15, fig.height = 12)
 ```{r, echo=F, warning=F, message=F}
 options(width = 100)
 source("helper_functions.R")
-tmp <- loadPhyloseq(dir = "C:/Users/ctata/Documents/Lab/methyl-mercury")
-ps <- tmp[[1]]
-ps_dds <- tmp[[2]]
+ps <- loadPhyloseq(dir = "C:/Users/ctata/Documents/Lab/methyl-mercury")
+
 ```
 
 #Prune OTUs and clean sample data
 ```{r}
-ps_dds_common <- getCommonOtus(ps_dds, numSamples = 12)
-ps_common <- getCommonOtus(ps_dds, numSamples = 12)
+ps_common <- getCommonOtus(ps, numSamples = 3)
 
-ps_dds_common <- cleanSampleData(ps_dds_common)
+#Samples without hair mercury data:
+# "CQR05" "CQR28" "CQR29" "CQR41"  "CQR48"
+#Sample without developmental outcome:
+#"CQR46"
+
 ps_common <- cleanSampleData(ps_common)
-
-otu_table(ps_common) <- asinh(otu_table(ps_common))
+#otu_table(ps_common) <- asinh(otu_table(ps_common))
+#otu_table(ps) <- asinh(otu_table(ps))
 
 ```
 
-
-#Linear Regression
-```{r}
-models_pdi <- runLinearRegression(y = "bayley36_pdi_adj", ps = ps_common, 
-                    method = "basic", permutations = 10, title = "PDI R^2")
-models_mdi <- runLinearRegression(y = "bayley36_mdi_adj", ps = ps_common,
-                    method = "basic", permutations = 10, title = "MDI R^2")
-```
 
 #Cross-validated linear regression with regularization
+#How perfectly are we able to explain the development data using subsets of data
+### We need to decrease regularization manually for mdi, because the fit is not super good. That said, there does seem to be more information there than random - let's think about how to test if this amount of difference is significant?
 ```{r}
-runLinearRegression(y = "bayley36_pdi_adj", ps = ps_common, 
-                    method = "cvglmnet", permutations = 10, title = "PDI R^2")
-runLinearRegression(y = "bayley36_mdi_adj", ps = ps_common,
-                    method = "cvglmnet", permutations = 10, title = "MDI R^2")
-
+source("helper_functions.R")
+models_pdi <- runLinearRegression(y = "bayley36_pdi_adj", ps = ps_common, 
+                    method = "cvglmnet", permutations = 10, reg_strength = 'lambda.min', title = "PDI R^2")
+models_mdi <- runLinearRegression(y = "bayley36_mdi_adj", ps = ps_common,
+                    method = "cvglmnet", permutations = 10, reg_strength = 0.95, title = "MDI R^2")
 ```
 
-
+```{r}
+ps_common <- recordSignificance(ps_common, models_pdi[[3]], method = "cvglmnet" ,column_name = "pdi_sig")
+ps_common <- recordSignificance(ps_common, models_mdi[[3]], method = "cvglmnet" ,column_name = "mdi_sig")
+```
 
 #PERMANOVA
-#####Asking the reverse question - how much of the microbiomes structure differences can be explained by each lifestyle characteristic. Note we're using just the top 14 most abundant otus (present in > 25% of samples). Having a farmer mother can explain 6% of the variance and being a male can explain 4.5%. 
+#####Asking the reverse question - how much of the microbiomes structure differences can be explained by each lifestyle characteristic. Maternal hair mercury is a significant (almost) explanatory variable for overall microbiome composition
 ```{r, echo=F, warning=F, message=F}
-perm <- runPermanova(ps_dds_common, method = "bray")
+perm <- runPermanova(ps_common, method = "bray")
 perm
 #Having a farmer mother can explain .06 percent of the variance in the microbiome. Being a male can explain .045% of it. 
 ```
 
 
-#####Now the same test but using all otus instead of the top 14
-```{r}
-perm_all <- runPermanova(ps_dds, method = "bray")
-perm_all
-```
-#
+
 #Constrained correspondence
 ````{r}
+source("helper_functions.R")
 dist  <- phyloseq::distance(physeq = ps_common, method = "bray")
-plotCCA(ps_common, color = "bayley36_mdi_adj")
-plotCCA(ps_common, color = "bayley36_pdi_adj")
+plotCCA(ps_common, dist, color = "bayley36_mdi_adj", shape = "Family", type = "sites")
+plotCCA(ps_common, dist, color = "Family", shape = "Phylum", type = "species")
 
+
+plotCCA(ps_common, dist, color = "bayley36_pdi_adj", shape = "Family", type = "sites")
+plotCCA(ps_common, dist, color = "Family", shape = "Phylum", type = "species")
+
+#Based on this plot, we should check out the relationship of mdi with Lachnospiraceae
+#And bifido for pdi
 ```
 
 #####Biplot
 ```{r}
-ps_common <- getCommonOtus(ps_dds, numSamples = 12)
-ps_common <- cleanSampleData(ps_common)
-ps_common <- prune_taxa(taxa_sums(ps_common) > 0, ps_common)
-ps_common <- prune_samples(sample_sums(ps_common) > 0, ps_common)
 
 cca <- ordinate(ps_common, "DPCoA")
 plot_scree(cca, "Scree Plot for Global Patterns Correspondence Analysis")
 
-plot_ordination(ps_dds_common, cca, type = "split", color="bayley36_mdi_adj", shape = "Genus") + geom_point(size=5)
+plot_ordination(ps_common, cca, type = "sites", color="bayley36_pdi_adj") + geom_point(size=5)
+plot_ordination(ps_common, cca, type = "sites", color="bayley36_mdi_adj") + geom_point(size=5)
+plot_ordination(ps_common, cca, type = "species", color = "Family", shape = "Phylum") + geom_point(size = 5)
 ```
 
 
@@ -91,47 +90,10 @@ plot_ordination(ps_dds_common, cca, type = "split", color="bayley36_mdi_adj", sh
 ##### Of the taxa that were labeled as "valuable" in the above models (seq7, seq9, seq16, seq64), the first three were associated with lower pdi and the last was associated with higher. We'd like to see where they fall on the phylogenetic tree. Red means negatively associated with pdi, and green means positively associated
 ```{r, echo=F, warning=F, message=F, out.height = 20, fig.height = 30, fig.width = 40}
 #got tree from clustalWal online
-tree <- ape::read.tree("data/tree/phylotree.txt")
-seqvars_pdi_neg <- c("seq7 ", "seq9 ", "seq16 ")
-seqvars_pdi_pos <- c("seq64 ")
-seqvars_mdi_neg <- c("seq1 ")
-seqvars_mdi_pos <- c("seq21 ")
-```
+colorspalette <- c("gray", "red", "forestgreen")
 
-```{r}
-ps <- readRDS("data/ps.RDS")
-taxa_names(ps) <- dict_esv_seq$seq
-phy_tree(ps) <- tree
-
-ps_filt <- filter_taxa(ps, function(abund) return(sum(abund > 0) > 8), prune = T)
-seqs <- taxa_names(ps_filt)
-
-rownames(dict_esv_seq) <- dict_esv_seq$seq
-taxa <- dict_esv_seq[seqs, ]$taxa
-taxa <- paste(taxa, "(", seqs, ")")
-
-#Plot automatic colors
-cols = rep("black", length(taxa))
-
-for (seq in seqvars_pdi_neg){
-  cols[grepl(seq, taxa)] <- "red"
-}
-for(seq in seqvars_pdi_pos){
-  cols[grepl(seq, taxa)] <- "green"
-}
-for(seq in seqvars_mdi_neg){
-  cols[grepl(seq, taxa)] <- "purple"
-}
-for(seq in seqvars_mdi_pos){
-  cols[grepl(seq, taxa)] <- "blue"
-}
-
-tree <- phy_tree(ps_filt)
-tree$tip.label <- taxa
-plot(tree, tip.color = cols, cex = 1)
-legend("right", legend = c("PDI Neg", "PDI Pos", "MDI Neg", "MDI Pos"), col = c("red", "green", "purple", "blue"), pch = 12, cex= 2 )
-#plot_tree(ps_filt, label.tips = "taxa_names", tip.colors = 'red')
-
+plot_tree(ps_common, label.tips = "taxa_names", color= "pdi_sig") + scale_color_manual(values=c(colorspalette))
+plot_tree(ps_common, label.tips = "taxa_names", color= "mdi_sig")+ scale_color_manual(values=c(colorspalette))
 ```
 
 
@@ -139,10 +101,8 @@ legend("right", legend = c("PDI Neg", "PDI Pos", "MDI Neg", "MDI Pos"), col = c(
 ##### lastly, we'd like to directly see how the abunance of the microbial taxa relates to the pdi. 
 ```{r, echo=F, warning=F, message=F}
 
-ps <- readRDS("data/ps.RDS")
-otu_raw <- data.frame(otu_table(ps))
-ps_dds <- readRDS("data/ps_dds.RDS")
-otu_dds <- data.frame(t(otu_table(ps_dds)))
+
+otu_dds <- data.frame(t(otu_table(ps)))
 colnames(otu_dds) <- paste('seq', seq(1, ncol(otu_dds)), sep ="")
 otu_dds <- otu_dds[rownames(df),]
 otu_raw <- otu_raw[rownames(df), ]
@@ -154,31 +114,37 @@ knitr::opts_chunk$set(fig.width=13, fig.height = 9)
 
 library(reshape2)
 library(ggplot2)
-df_use <- cbind(df, otu_dds)
-df_use$sampleid <- paste("Sample", seq(1, nrow(df_use)), sep = "")
-df_use$pdi_binned <- cut(df_use$bayley36_pdi_adj, breaks = 10)
-df_use$pdi_binned <- factor(df_use$pdi_binned, labels = seq(1, 9))
-df_use$diversity <- vegan::diversity(otu_raw, index = "shannon")
-df_use$seqDepth <- rowSums(otu_raw)
-df_melt <- melt(df_use, "sampleid")
-
-
-otus <- c("seq7", "seq9", "seq16", "seq64")
-for(otu in otus){
-  print(otu)
-  p <- ggplot(df_use, aes_string("bayley36_pdi_adj", y = otu))
-  p <- p + geom_point(aes(color = diversity, size = seqDepth))
-  print(p)
+boxplotSigTaxa <- function(ps){
+  otu <- otu_table(ps)
+  df <- sample_data(ps)
+  df_use <- cbind(df, otu)
+  df_use$sampleid <- paste("Sample", seq(1, nrow(df_use)), sep = "")
+  df_use$pdi_binned <- cut(df_use$bayley36_pdi_adj, breaks = 10)
+  df_use$pdi_binned <- factor(df_use$pdi_binned, labels = seq(1, 9))
+  df_use$diversity <- vegan::diversity(otu, index = "shannon")
+  df_use$seqDepth <- rowSums(otu)
+  df_melt <- melt(df_use, "sampleid")
+  
+  sig_taxa <- rownames(tax_table(ps))[tax_table(ps)[ , 'pdi_sig'] != "0" & !is.na(tax_table(ps)[ , 'pdi_sig'])]
+  for(taxa in sig_taxa){
+    print(taxa)
+    dir = tax_table(ps)[taxa, "pdi_sig"] 
+    p <- ggplot(df_use, aes_string("bayley36_pdi_adj", y = taxa))
+    p <- p + geom_point(aes(color = diversity, size = seqDepth)) + ggtitle(paste(taxa, ": PDI ", dir ))
+    print(p)
+  }
+  
+  sig_taxa <- rownames(tax_table(ps))[tax_table(ps)[ , 'mdi_sig'] != "0" & !is.na(tax_table(ps)[ , 'mdi_sig'])]
+  for(taxa in sig_taxa){
+    print(taxa)
+    dir = tax_table(ps)[taxa, "mdi_sig"] 
+    p <- ggplot(df_use, aes_string("bayley36_mdi_adj", y = taxa))
+    p <- p + geom_point(aes(color = diversity, size = seqDepth))+ ggtitle(paste(taxa, ": MDI ", dir ))
+    print(p)
+  }
 }
 
-otus <- c("seq1", "seq21")
-for(otu in otus){
-  print(otu)
-  p <- ggplot(df_use, aes_string("bayley36_mdi_adj", y = otu))
-  p <- p + geom_point(aes(color = diversity, size = seqDepth))
-  print(p)
-}
-
+boxplotSigTaxa(ps_common)
 
 ```
 
